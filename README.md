@@ -10,7 +10,8 @@ Automating onboarding, role changes and offboarding in Microsoft Entra ID with P
 - [x] Step 2: Install PowerShell 7 on macOS (Apple Silicon)
 - [x] Step 3: Install the Microsoft Graph PowerShell modules
 - [x] Step 4: Connect to the tenant with Microsoft Graph (least-privilege scopes)
-- [ ] Step 5: Create role-based security groups
+- [x] Step 5: Create role-based security groups (RBAC)
+- [ ] Step 6: Define the role-to-group mapping as configuration
 
 ## Lab environment
 
@@ -79,6 +80,30 @@ Account TenantId                             Scopes
 ```
 
 Checking the session context before making changes confirms *which tenant* and *which permissions* the script will run with. Running against the wrong tenant is a common real-world mistake.
+
+## Step 5: Role-based security groups (RBAC)
+
+**What:** Created seven security groups that represent job roles. Access is granted through group membership, never directly to individuals.
+
+**Why:** Granting access person by person leads to privilege creep (people keep old access when they change jobs) and makes audits slow. With role-based access control, a role maps to a fixed set of groups, so a person gets exactly what their role needs and loses it when the role changes. "Who can approve payments?" is answered by looking at one group.
+
+| Job title | Groups |
+|---|---|
+| Everyone | LAB-AllStaff |
+| Finance Analyst | LAB-Finance, LAB-Finance-Reports |
+| Accounts Payable Clerk | LAB-Finance, LAB-Finance-Payments |
+| Finance Manager | LAB-Finance, LAB-Finance-Reports, LAB-Finance-Approvers |
+| IT Support Analyst | LAB-IT, LAB-IT-Helpdesk |
+
+**Segregation of duties:** `LAB-Finance-Approvers` and `LAB-Finance-Payments` are deliberately separate, so no single person can both make and approve a payment. A later access review step flags anyone who ends up in both.
+
+**Design choices:**
+- Security groups (not Microsoft 365 groups), because they are for access, not collaboration. `GroupTypes` is empty, confirming a plain security group.
+- `LAB-` naming prefix so it is clear which groups the automation manages.
+- A description on every group records its purpose for auditors.
+- The creation script ([scripts/New-LabGroups.ps1](scripts/New-LabGroups.ps1)) is **idempotent**: it checks whether each group exists first, so re-running it never creates duplicates.
+
+![Role groups in Entra ID](screenshots/02-rbac-groups.png)
 
 ## Troubleshooting log
 
