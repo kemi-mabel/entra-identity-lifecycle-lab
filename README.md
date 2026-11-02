@@ -2,16 +2,19 @@
 
 Automating onboarding, role changes and offboarding in Microsoft Entra ID with PowerShell and Microsoft Graph, built in a personal test tenant.
 
-> Status: in progress. This README is updated as each step is completed.
+> Status: in progress. Built in 7 phases; this README is updated as each phase is completed.
 
 ## Progress
 
-- [x] Step 1: Create a test Entra ID tenant
-- [x] Step 2: Install PowerShell 7 on macOS (Apple Silicon)
-- [x] Step 3: Install the Microsoft Graph PowerShell modules
-- [x] Step 4: Connect to the tenant with Microsoft Graph (least-privilege scopes)
-- [x] Step 5: Create role-based security groups (RBAC)
-- [ ] Step 6: Define the role-to-group mapping as configuration
+| Phase | Scope | Status |
+|---|---|---|
+| 1. Environment setup | Test tenant, PowerShell 7, Graph modules, least-privilege connection | Done |
+| 2. RBAC design | Role groups, role-to-group mapping, segregation of duties rule | Done |
+| 3. Joiner automation | Create users from an HR feed and assign role groups | Planned |
+| 4. Mover and leaver automation | Swap access on role change; disable, revoke sessions and remove access on exit; preview mode and audit log | Planned |
+| 5. Access review | Report memberships; flag over-privileged accounts, disabled accounts with access, and segregation of duties conflicts | Planned |
+| 6. MFA and SSO | Enforce MFA and configure SAML 2.0 single sign-on for a test app | Planned |
+| 7. Documentation | Offboarding SOP, helpdesk knowledge article, final write-up | Planned |
 
 ## Lab environment
 
@@ -21,6 +24,8 @@ Automating onboarding, role changes and offboarding in Microsoft Entra ID with P
 | Shell | PowerShell 7.6.9 |
 | Identity platform | Microsoft Entra ID (Free license), dedicated test tenant |
 | Modules | Microsoft.Graph.Authentication, .Users, .Users.Actions, .Groups (v2.41.2) |
+
+# Phase 1: Environment setup
 
 ## Step 1: Test tenant
 
@@ -81,6 +86,8 @@ Account TenantId                             Scopes
 
 Checking the session context before making changes confirms *which tenant* and *which permissions* the script will run with. Running against the wrong tenant is a common real-world mistake.
 
+# Phase 2: RBAC design
+
 ## Step 5: Role-based security groups (RBAC)
 
 **What:** Created seven security groups that represent job roles. Access is granted through group membership, never directly to individuals.
@@ -104,6 +111,35 @@ Checking the session context before making changes confirms *which tenant* and *
 - The creation script ([scripts/New-LabGroups.ps1](scripts/New-LabGroups.ps1)) is **idempotent**: it checks whether each group exists first, so re-running it never creates duplicates.
 
 ![Role groups in Entra ID](screenshots/02-rbac-groups.png)
+
+## Step 6: Role-to-group mapping as configuration
+
+**What:** The RBAC table is stored as data in [config/roles.json](config/roles.json) instead of being written into the scripts.
+
+```json
+{
+  "defaultGroups": ["LAB-AllStaff"],
+  "roles": {
+    "Finance Analyst":        ["LAB-Finance", "LAB-Finance-Reports"],
+    "Accounts Payable Clerk": ["LAB-Finance", "LAB-Finance-Payments"],
+    "Finance Manager":        ["LAB-Finance", "LAB-Finance-Reports", "LAB-Finance-Approvers"],
+    "IT Support Analyst":     ["LAB-IT", "LAB-IT-Helpdesk"]
+  },
+  "segregationOfDuties": [
+    ["LAB-Finance-Approvers", "LAB-Finance-Payments"]
+  ]
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `defaultGroups` | Groups every employee receives, whatever their role |
+| `roles` | Job title to the exact groups that role needs |
+| `segregationOfDuties` | Pairs of groups one person must never hold together |
+
+A person's access is always `defaultGroups` plus the groups for their job title. For example, a new IT Support Analyst receives LAB-AllStaff, LAB-IT and LAB-IT-Helpdesk, and nothing from Finance.
+
+**Why:** Separating data from code means a new job title is a small, reviewable config change rather than a code change that needs retesting. Access decisions are made once, at the role level, instead of case by case for each person.
 
 ## Troubleshooting log
 
