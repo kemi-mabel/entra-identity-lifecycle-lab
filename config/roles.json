@@ -1,0 +1,12 @@
+{
+  "defaultGroups": ["LAB-AllStaff"],
+  "roles": {
+    "Finance Analyst":        ["LAB-Finance", "LAB-Finance-Reports"],
+    "Accounts Payable Clerk": ["LAB-Finance", "LAB-Finance-Payments"],
+    "Finance Manager":        ["LAB-Finance", "LAB-Finance-Reports", "LAB-Finance-Approvers"],
+    "IT Support Analyst":     ["LAB-IT", "LAB-IT-Helpdesk"]
+  },
+  "segregationOfDuties": [
+    ["LAB-Finance-Approvers", "LAB-Finance-Payments"]
+  ]
+}
