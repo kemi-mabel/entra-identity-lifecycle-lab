@@ -3,7 +3,7 @@
 # then adds each one to the groups their job title allows (roles.json).
 # Requires an active Microsoft Graph session (Connect-MgGraph).
 
-$domain = "oluwakemimabellgmail173.onmicrosoft.com"
+$domain = "<your-tenant>.onmicrosoft.com"   # replace with your tenant's domain
 
 # Load the role rules and the HR feed
 $config = Get-Content roles.json -Raw | ConvertFrom-Json

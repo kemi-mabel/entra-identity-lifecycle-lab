@@ -10,7 +10,7 @@ Automating onboarding, role changes and offboarding in Microsoft Entra ID with P
 |---|---|---|
 | 1. Environment setup | Test tenant, PowerShell 7, Graph modules, least-privilege connection | Done |
 | 2. RBAC design | Role groups, role-to-group mapping, segregation of duties rule | Done |
-| 3. Joiner automation | Create users from an HR feed and assign role groups | Planned |
+| 3. Joiner automation | Create users from an HR feed and assign role groups | Done |
 | 4. Mover and leaver automation | Swap access on role change; disable, revoke sessions and remove access on exit; preview mode and audit log | Planned |
 | 5. Access review | Report memberships; flag over-privileged accounts, disabled accounts with access, and segregation of duties conflicts | Planned |
 | 6. MFA and SSO | Enforce MFA and configure SAML 2.0 single sign-on for a test app | Planned |
@@ -24,6 +24,7 @@ Automating onboarding, role changes and offboarding in Microsoft Entra ID with P
 | Shell | PowerShell 7.6.9 |
 | Identity platform | Microsoft Entra ID (Free license), dedicated test tenant |
 | Modules | Microsoft.Graph.Authentication, .Users, .Users.Actions, .Groups (v2.41.2) |
+| Automation account | `labadmin`, a cloud-only account holding only the User Administrator role, protected by MFA |
 
 # Phase 1: Environment setup
 
@@ -141,17 +142,85 @@ A person's access is always `defaultGroups` plus the groups for their job title.
 
 **Why:** Separating data from code means a new job title is a small, reviewable config change rather than a code change that needs retesting. Access decisions are made once, at the role level, instead of case by case for each person.
 
+# Phase 3: Joiner automation
+
+**Goal:** when HR records a new hire, their account is created automatically with exactly the access their role needs. HR is the source of truth; IT does not create accounts by hand.
+
+## Step 7: Dedicated least-privilege admin account
+
+Before automating, a dedicated cloud-only admin account (`labadmin`) was created and used for all further work instead of the personal Microsoft account that created the tenant.
+
+- **Role: User Administrator, not Global Administrator.** It can create and update users and manage group membership, which is all the automation needs. If it were ever compromised, the damage would be limited to that scope.
+- **MFA required.** Security defaults forced MFA registration on first sign-in because the account holds an admin role.
+- Its first sign-in required a password change, the same "change at first sign-in" control the joiner script applies to new hires.
+
+## Step 8: The HR feed
+
+[data/hr_feed.csv](data/hr_feed.csv) simulates an export from an HR system.
+
+| Column | Purpose |
+|---|---|
+| `EmployeeId` | Unique, permanent key. Used to recognise a person on every run; names can be duplicated or change |
+| `FirstName`, `LastName` | Display name and sign-in name (`firstname.lastname@tenant`) |
+| `Department` | Stored on the account for reporting |
+| `JobTitle` | Looked up in `roles.json` to decide group membership |
+| `Status` | `Active` or `Terminated`. Phase 3 acts on `Active` only |
+
+## Step 9: Joiner logic, tested by hand first
+
+Each part of the logic was run manually against one person (Amara Okafor) before being automated: looking her up by `employeeId` (no result, so she is a joiner), calculating her groups from `roles.json`, creating her account, adding her to the groups, then verifying membership from the reverse direction (`Get-MgUserMemberOf`).
+
+Graph only returns a default set of properties, so `EmployeeId` and `Department` appeared blank after creation until requested explicitly with `-Property`. The values had been saved correctly.
+
+![Amara's groups in Entra](screenshots/03-joiner-amara-groups.png)
+
+## Step 10: The joiner script
+
+[scripts/Invoke-Joiner.ps1](scripts/Invoke-Joiner.ps1) runs the same logic for everyone in the feed. For each person:
+
+```
+Status Active?                    no  -> skip (leavers are Phase 4)
+Account with this EmployeeId?     yes -> skip (not a joiner; safe to re-run)
+Groups = defaultGroups + groups for JobTitle
+Unknown JobTitle?                 yes -> default groups only, print a warning
+Create account (random temporary password, must change at first sign-in)
+Add to each group
+```
+
+Design choices:
+- **Idempotent:** matching on `EmployeeId` means re-running never creates duplicates.
+- **Least privilege:** an unknown job title gets only the default group. The script never guesses; missing access gets reported and fixed, while excess access often goes unnoticed.
+- **No secrets exposed:** the temporary password is never printed or logged, and the user must replace it at first sign-in, so IT never knows it.
+
+The script reads `roles.json` and `hr_feed.csv` from the folder it is run in.
+
+### Results
+
+First run: Amara (already created by hand) was skipped; Liam and Sofia were created with exactly their role groups. Sofia, an Accounts Payable Clerk, received `LAB-Finance-Payments` but not `LAB-Finance-Approvers`, so segregation of duties holds from day one.
+
+![Joiner script run](screenshots/04-joiner-script-run.png)
+
+### Edge case: unknown job title
+
+A hire with a job title missing from `roles.json` ("Recruitment Specialist") was added to the feed. The script warned, created the account with the default group only, and skipped the three existing employees.
+
+![Unknown job title handled](screenshots/05-joiner-unknown-title.png)
+
 ## Troubleshooting log
 
 | Problem | Cause | Fix |
 |---|---|---|
 | `brew install --cask powershell` failed: "No Cask with this name exists" | Homebrew disabled the cask after it failed the macOS Gatekeeper check | Installed the signed `osx-arm64.pkg` from the official PowerShell releases page |
 | "Untrusted repository" prompt during `Install-Module` | PSGallery is not trusted by default | Confirmed it is Microsoft's official gallery and accepted (A) |
-| `Connect-MgGraph` returned with no output and `Get-MgContext` was empty | The interactive browser sign-in never launched on macOS, and the failure was silent | Switched to device code flow (`-UseDeviceCode`) |
+| `Connect-MgGraph` returned with no output and `Get-MgContext` was empty | No `-TenantId` was given, so the personal admin account was not routed to the tenant and the sign-in failed silently (confirmed later when browser sign-in worked once `-TenantId` was added) | Added `-TenantId` |
 | `$Error[0]` showed "Access to the path '/usr/local/share/powershell' is denied" | Unrelated: PowerShellGet tried to create an all-users folder during the earlier install. Modules were installed per-user, so it had no effect | Identified as noise, not the root cause |
 | Device code sign-in failed with "The code you entered has expired" on login.live.com | The tenant admin is a personal Microsoft account. Without a tenant specified, sign-in was routed to the consumer endpoint, which did not recognize the work-tenant code | Added `-TenantId` so sign-in went to login.microsoftonline.com for this tenant |
 | "Authentication timed out after 120 seconds" | Sign-in plus the first-time consent screen took longer than PowerShell's 120-second wait | Re-ran; consent was already stored, so sign-in completed quickly |
 
-## Improvements noted
-- Create a dedicated cloud-only admin account in the tenant instead of using a personal Microsoft account as admin (the `Account` field is blank for the personal account, and separating admin identities from everyday ones is standard practice).
+| `Get-MgUser` failed with "DeviceCodeCredential authentication failed" the next day | The saved session's access token had expired. Tokens are short-lived by design | `Disconnect-MgGraph`, then signed in again |
+| Device code sign-in as `labadmin` blocked with error 530035 | Security defaults blocked device code flow for an account holding an admin role. Device code flow is commonly abused in phishing | Used standard browser sign-in with `-TenantId` instead of turning off security defaults |
+| `EmployeeId` and `Department` blank after `New-MgUser` | Graph returns only default properties | Requested them explicitly with `-Property`; the values were saved correctly |
 
+## Improvements noted
+- ~~Use a dedicated cloud-only admin account instead of a personal Microsoft account~~ Done in Phase 3 (`labadmin`, User Administrator only).
+- Generate temporary passwords with a cryptographic random generator in a production version.
