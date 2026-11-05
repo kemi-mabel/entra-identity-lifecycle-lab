@@ -11,7 +11,7 @@ Automating onboarding, role changes and offboarding in Microsoft Entra ID with P
 | 1. Environment setup | Test tenant, PowerShell 7, Graph modules, least-privilege connection | Done |
 | 2. RBAC design | Role groups, role-to-group mapping, segregation of duties rule | Done |
 | 3. Joiner automation | Create users from an HR feed and assign role groups | Done |
-| 4. Mover and leaver automation | Swap access on role change; disable, revoke sessions and remove access on exit; preview mode and audit log | Planned |
+| 4. Mover and leaver automation | Swap access on role change; disable, revoke sessions and remove access on exit; preview mode and audit log | Done |
 | 5. Access review | Report memberships; flag over-privileged accounts, disabled accounts with access, and segregation of duties conflicts | Planned |
 | 6. MFA and SSO | Enforce MFA and configure SAML 2.0 single sign-on for a test app | Planned |
 | 7. Documentation | Offboarding SOP, helpdesk knowledge article, final write-up | Planned |
@@ -206,6 +206,135 @@ A hire with a job title missing from `roles.json` ("Recruitment Specialist") was
 
 ![Unknown job title handled](screenshots/05-joiner-unknown-title.png)
 
+# Phase 4: Mover and leaver automation
+
+**Goal:** when someone changes role, their access changes to match exactly; when someone leaves, they lose all access immediately. One script handles joiners, movers and leavers, previews every change first, and logs every action.
+
+## Step 11: A new permission, approved by a separate admin
+
+Offboarding needs to sign people out of sessions that are already open, so the Graph scope `User.RevokeSessions.All` was added.
+
+| Scope | Why it is needed |
+|---|---|
+| `User.RevokeSessions.All` | Sign a leaver out of every device immediately. Disabling an account alone stops new sign-ins, but existing sessions can keep working until their tokens expire |
+
+When `labadmin` requested it, Entra returned **"Need admin approval"**. A User Administrator cannot grant tenant-wide consent to an app, so the Global Administrator approved it once. This separates **using** a permission from **approving** it, so the automation account cannot grant itself new access.
+
+Two checks apply to every delegated call:
+- **Consent:** has the app been approved to do this kind of action in the tenant?
+- **Role:** is the signed-in person allowed to do it? (`labadmin` already had the right to revoke sessions through User Administrator; consent only opened that action to the script.)
+
+The scope was added only when the work needed it, not up front.
+
+## Step 12: Mover, tested by hand
+
+**Scenario:** Sofia Martins is promoted from Accounts Payable Clerk to Finance Manager.
+
+The mover logic calculates the **minimum change** between what the person has and what their new role allows:
+
+| Current groups | Wanted groups | Action |
+|---|---|---|
+| LAB-AllStaff | LAB-AllStaff | none |
+| LAB-Finance | LAB-Finance | none |
+| LAB-Finance-Payments | | **remove** |
+| | LAB-Finance-Reports | **add** |
+| | LAB-Finance-Approvers | **add** |
+
+Why not remove everything and re-add the new set:
+- Groups in both roles are never touched, so there is no access gap.
+- A failure halfway leaves the person mostly intact instead of with nothing.
+- The audit trail shows only real changes.
+- Groups the automation does not manage are never affected.
+
+**Remove before add:** if Approvers were added first, Sofia would briefly hold both `LAB-Finance-Payments` and `LAB-Finance-Approvers`, breaking segregation of duties. Removing first means that never happens.
+
+![Sofia's job title updated](screenshots/06-mover-sofia-title.png)
+
+![Sofia's groups after promotion](screenshots/07-mover-sofia-groups.png)
+
+## Step 13: Leaver, tested by hand
+
+**Scenario:** Liam Chen leaves the company. Three actions, in order:
+
+1. **Disable the account**: no new sign-ins.
+2. **Revoke sign-in sessions**: Entra sets a "sessions valid from" time; any token issued before it is rejected, so every device is signed out.
+3. **Remove all managed groups**: if the account were ever re-enabled by mistake, it would have no access.
+
+The account is **disabled, not deleted**, so files can be recovered and auditors can still see who had what. Deletion is a separate, deliberate step after a retention period.
+
+![Liam disabled with no group memberships](screenshots/08-leaver-liam-disabled.png)
+
+## Step 14: The lifecycle script
+
+[scripts/Invoke-JMLSync.ps1](scripts/Invoke-JMLSync.ps1) compares the HR feed with Entra ID and acts only on the difference.
+
+```
+For each person in the HR feed (matched by EmployeeId):
+  Terminated  -> already disabled with no managed groups? skip
+                 otherwise disable, revoke sessions, remove managed groups
+  No account  -> joiner: create account, add role groups
+  Disabled but Active in HR -> flag for manual review (possible rehire), change nothing
+  Otherwise   -> mover: update title/department if changed,
+                 remove groups no longer needed, then add new ones
+```
+
+Safety features:
+- **Preview mode (`-WhatIf`)**: shows every planned change without making it.
+- **Audit log**: every action is written to a timestamped CSV with the employee ID, action and result.
+- **Managed groups only**: the script builds its list of managed groups from `roles.json` and never adds or removes any other group.
+- **Rehire guard**: a disabled account is never silently re-enabled.
+- **Idempotent**: running it again with the same feed makes no changes.
+
+## Step 15: Preview caught a bad change
+
+The first preview ran against an HR file that had not been updated. It planned to move Sofia back to Accounts Payable Clerk, undoing her promotion, and flagged Liam (disabled, but Active in the stale file) for manual review rather than re-enabling him.
+
+![Preview against a stale HR file](screenshots/09-preview-caught-stale-feed.png)
+
+Because it was a preview, nothing changed. The HR file was corrected ([data/hr_feed_phase4.csv](data/hr_feed_phase4.csv)) and the preview re-run. The script trusts HR as the source of truth, so a data problem is fixed at the source, not in Entra.
+
+## Step 16: Apply, audit and re-run
+
+After reviewing the corrected preview, the sync was applied:
+
+```
+MOVER    Amara Okafor     Update title to IT Support Analyst, department to IT [Success]
+MOVER    Amara Okafor     Remove from LAB-Finance [Success]
+MOVER    Amara Okafor     Remove from LAB-Finance-Reports [Success]
+MOVER    Amara Okafor     Add to LAB-IT [Success]
+MOVER    Amara Okafor     Add to LAB-IT-Helpdesk [Success]
+OK       Liam Chen        already offboarded
+OK       Sofia Martins    matches HR, no change
+LEAVER   Noah Bennett     Disable account [Success]
+LEAVER   Noah Bennett     Revoke sign-in sessions [Success]
+LEAVER   Noah Bennett     Remove from LAB-AllStaff [Success]
+```
+
+Audit log (`logs/jml-applied-*.csv`):
+
+```
+Timestamp           Type   EmployeeId Name         Action                                               Result
+2026-11-05 10:26:29 MOVER  1001       Amara Okafor Update title to IT Support Analyst, department to IT Success
+2026-11-05 10:26:29 MOVER  1001       Amara Okafor Remove from LAB-Finance                              Success
+2026-11-05 10:26:30 MOVER  1001       Amara Okafor Remove from LAB-Finance-Reports                      Success
+2026-11-05 10:26:30 MOVER  1001       Amara Okafor Add to LAB-IT                                        Success
+2026-11-05 10:26:31 MOVER  1001       Amara Okafor Add to LAB-IT-Helpdesk                               Success
+2026-11-05 10:26:32 LEAVER 1004       Noah Bennett Disable account                                      Success
+2026-11-05 10:26:33 LEAVER 1004       Noah Bennett Revoke sign-in sessions                              Success
+2026-11-05 10:26:33 LEAVER 1004       Noah Bennett Remove from LAB-AllStaff                             Success
+```
+
+Only real changes are logged. Running the sync again with the same feed made no changes:
+
+```
+OK       Amara Okafor     matches HR, no change
+OK       Liam Chen        already offboarded
+OK       Sofia Martins    matches HR, no change
+OK       Noah Bennett     already offboarded
+
+No changes needed.
+```
+
 ## Troubleshooting log
 
 | Problem | Cause | Fix |
@@ -220,7 +349,11 @@ A hire with a job title missing from `roles.json` ("Recruitment Specialist") was
 | `Get-MgUser` failed with "DeviceCodeCredential authentication failed" the next day | The saved session's access token had expired. Tokens are short-lived by design | `Disconnect-MgGraph`, then signed in again |
 | Device code sign-in as `labadmin` blocked with error 530035 | Security defaults blocked device code flow for an account holding an admin role. Device code flow is commonly abused in phishing | Used standard browser sign-in with `-TenantId` instead of turning off security defaults |
 | `EmployeeId` and `Department` blank after `New-MgUser` | Graph returns only default properties | Requested them explicitly with `-Property`; the values were saved correctly |
+| "Need admin approval" when `labadmin` requested `User.RevokeSessions.All` | User Administrator cannot grant tenant-wide consent for a new app permission | Global Administrator granted admin consent once; `labadmin` then signed in without the prompt |
+| First sync preview planned to undo a promotion | The HR file had not been updated, and the script treats HR as the source of truth | Caught in preview mode before any change; corrected the HR file and re-ran |
 
 ## Improvements noted
 - ~~Use a dedicated cloud-only admin account instead of a personal Microsoft account~~ Done in Phase 3 (`labadmin`, User Administrator only).
 - Generate temporary passwords with a cryptographic random generator in a production version.
+- Read the HR feed from the HR system's API instead of a CSV, and run the sync on a schedule.
+- Look up group IDs once per run instead of once per change, to reduce Graph calls.

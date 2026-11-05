@@ -1,0 +1,5 @@
+EmployeeId,FirstName,LastName,Department,JobTitle,Status
+1001,Amara,Okafor,IT,IT Support Analyst,Active
+1002,Liam,Chen,IT,IT Support Analyst,Terminated
+1003,Sofia,Martins,Finance,Finance Manager,Active
+1004,Noah,Bennett,HR,Recruitment Specialist,Terminated
